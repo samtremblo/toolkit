@@ -34,6 +34,7 @@ VideoPlayer::VideoPlayer()
       ffmpeg_resources(std::make_shared<FFmpegResourceManager>()),
       audio_manager(std::make_unique<AudioManager>()),
       video_manager(std::make_unique<VideoManager>()),
+      sync_manager(std::make_unique<SyncManager>()),
       video_stream_index(-1), audio_stream_index(-1) {
     
     // Register signal handlers
@@ -53,7 +54,34 @@ VideoPlayer::VideoPlayer()
     std::cout << "Crash protection enabled" << std::endl;
 }
 
+VideoPlayer::VideoPlayer(const std::string& config_file_path) 
+    : window_name("Threaded Audio Video Player"),
+      ffmpeg_resources(std::make_shared<FFmpegResourceManager>()),
+      audio_manager(std::make_unique<AudioManager>()),
+      video_manager(std::make_unique<VideoManager>()),
+      sync_manager(SyncManager::create_with_config(config_file_path)),
+      video_stream_index(-1), audio_stream_index(-1),
+      config_file_path(config_file_path) {
+    
+    // Register signal handlers
+    signal(SIGSEGV, signal_handler);
+    signal(SIGABRT, signal_handler);
+    signal(SIGFPE, signal_handler);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+    g_player_instance = this;
+    
+    // Initialize SDL Audio
+    if (SDL_Init(SDL_INIT_AUDIO) < 0) {
+        std::cout << "SDL could not initialize! SDL Error: " << SDL_GetError() << std::endl;
+    }
+    
+    std::cout << "Crash protection enabled with config: " << config_file_path << std::endl;
+}
+
 VideoPlayer::~VideoPlayer() {
+    sync_manager.reset();
     audio_manager.reset();
     video_manager.reset();
     ffmpeg_resources.reset();
@@ -110,6 +138,9 @@ bool VideoPlayer::load_video(const std::string& filename) {
         audio_manager->start_audio_thread();
     }
     
+    // Setup sync callbacks
+    setup_sync_callbacks();
+    
     std::cout << "Video player initialized successfully. Starting playback..." << std::endl;
     return true;
 }
@@ -156,12 +187,17 @@ void VideoPlayer::sync_audio_to_video_position(double position) {
     }
 }
 
-void VideoPlayer::seek_to_percentage(double percentage) {
+void VideoPlayer::seek_to_percentage(double percentage, bool broadcast) {
     video_manager->seek_to_percentage(percentage);
     
     if (audio_manager->is_initialized()) {
         double seek_position = video_manager->get_video_clock();
         sync_audio_to_video_position(seek_position);
+    }
+    
+    // Broadcast seek to network if enabled and we're the master
+    if (broadcast && sync_enabled.load() && is_sync_master.load() && sync_manager) {
+        sync_manager->broadcast_seek_cue(video_manager->get_video_clock());
     }
 }
 
@@ -182,6 +218,12 @@ void VideoPlayer::handle_key(char key) {
             break;
         case 'm': // Mute audio
             audio_manager->toggle_mute();
+            break;
+        case 's': // Enable/disable sync
+            enable_sync(!sync_enabled.load());
+            break;
+        case 'S': // Toggle sync master
+            set_sync_master(!is_sync_master.load());
             break;
         case '0': seek_to_percentage(0.0); break;
         case '1': seek_to_percentage(10.0); break;
@@ -243,7 +285,7 @@ void VideoPlayer::play() {
                 }
                 
                 // Add overlay information
-                cv::putText(display_frame, "Threaded Audio Video Player - Press 0-9 to seek, Q to quit, Space to pause, M to mute", 
+                cv::putText(display_frame, "Threaded Audio Video Player - 0-9: seek, Space: pause, M: mute, S: sync, Shift+S: master", 
                            cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.6, 
                            cv::Scalar(0, 255, 0), 2);
                 
@@ -252,14 +294,16 @@ void VideoPlayer::play() {
                 size_t cache_size = video_manager->get_cache_size();
                 
                 snprintf(frame_info, sizeof(frame_info), 
-                        "Frame %d/%zu (%.1f%%) | Video: %.2fs | Audio: %s | Buffer: %zu bytes", 
+                        "Frame %d/%zu (%.1f%%) | Video: %.2fs | Audio: %s | Sync: %s%s | Clients: %zu", 
                         current_frame_num + 1, cache_size,
                         (current_frame_num + 1) * 100.0 / cache_size,
                         current_pts,
                         audio_manager->is_initialized() ? 
                             (audio_manager->is_muted() ? "MUTED" : 
-                             (audio_manager->is_running() ? "THREADED" : "OFF")) : "N/A",
-                        audio_manager->get_buffer_size());
+                             (audio_manager->is_running() ? "ON" : "OFF")) : "N/A",
+                        sync_enabled.load() ? "ON" : "OFF",
+                        (sync_enabled.load() && is_sync_master.load()) ? "-MASTER" : "",
+                        sync_manager ? sync_manager->get_client_count() : 0);
                 
                 cv::putText(display_frame, frame_info, cv::Point(10, 60), 
                            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
@@ -300,4 +344,103 @@ void VideoPlayer::play() {
     
     cv::destroyAllWindows();
     std::cout << "Cached playback finished" << std::endl;
+}
+
+void VideoPlayer::enable_sync(bool enable) {
+    sync_enabled.store(enable);
+    
+    if (enable) {
+        if (!sync_manager) {
+            // Create default sync manager if none exists
+            sync_manager = SyncManager::create_default();
+            setup_sync_callbacks();
+        }
+        sync_manager->set_enabled(true);
+        std::cout << "Network sync enabled" << std::endl;
+    } else {
+        if (sync_manager) {
+            sync_manager->set_enabled(false);
+        }
+        std::cout << "Network sync disabled" << std::endl;
+    }
+}
+
+void VideoPlayer::set_sync_master(bool is_master) {
+    is_sync_master.store(is_master);
+    std::cout << "Sync master: " << (is_master ? "ENABLED" : "DISABLED") << std::endl;
+    
+    if (is_master && sync_enabled.load() && sync_manager) {
+        // Broadcast current state when becoming master
+        if (is_paused.load()) {
+            sync_manager->broadcast_pause_cue();
+        } else {
+            sync_manager->broadcast_resume_cue();
+        }
+    }
+}
+
+void VideoPlayer::setup_sync_callbacks() {
+    if (!sync_manager) return;
+    
+    sync_manager->set_sync_callback([this](uint32_t frame_number) {
+        on_network_sync(frame_number);
+    });
+    
+    sync_manager->set_seek_callback([this](double position) {
+        on_network_seek(position);
+    });
+    
+    sync_manager->set_pause_callback([this]() {
+        on_network_pause();
+    });
+    
+    sync_manager->set_resume_callback([this]() {
+        on_network_resume();
+    });
+    
+    sync_manager->set_client_connected_callback([this](uint32_t client_id, const std::string& name, const std::string& ip) {
+        std::cout << "Client connected: " << name << " (" << ip << ") ID: " << client_id << std::endl;
+    });
+}
+
+void VideoPlayer::on_network_sync(uint32_t frame_number) {
+    if (is_sync_master.load()) return; // Masters don't respond to sync cues
+    
+    std::cout << "Network sync to frame: " << frame_number << std::endl;
+    video_manager->set_current_frame(frame_number);
+    
+    if (audio_manager->is_initialized()) {
+        double seek_position = video_manager->get_video_clock();
+        sync_audio_to_video_position(seek_position);
+    }
+}
+
+void VideoPlayer::on_network_seek(double position) {
+    if (is_sync_master.load()) return; // Masters don't respond to seek cues
+    
+    std::cout << "Network seek to: " << position << "s" << std::endl;
+    
+    // Convert position to percentage and seek without broadcasting
+    double percentage = (position / (video_manager->get_total_frames() / video_manager->get_fps())) * 100.0;
+    seek_to_percentage(percentage, false);
+}
+
+void VideoPlayer::on_network_pause() {
+    if (is_sync_master.load()) return; // Masters don't respond to pause cues
+    
+    if (!is_paused.load()) {
+        std::cout << "Network pause received" << std::endl;
+        is_paused.store(true);
+        audio_manager->pause_playback();
+    }
+}
+
+void VideoPlayer::on_network_resume() {
+    if (is_sync_master.load()) return; // Masters don't respond to resume cues
+    
+    if (is_paused.load()) {
+        std::cout << "Network resume received" << std::endl;
+        is_paused.store(false);
+        audio_manager->start_playback();
+    }
 }

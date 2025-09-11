@@ -15,10 +15,15 @@ set(SOURCES
     src/main.cpp
     src/core/VideoPlayer.cpp
     src/core/FFmpegResourceManager.cpp
+    src/core/NetworkConfig.cpp
     src/audio/AudioManager.cpp
     src/audio/AudioClock.cpp
     src/video/VideoManager.cpp
     src/utils/CircularBuffer.cpp
+    src/network/SyncProtocol.cpp
+    src/network/UDPSyncServer.cpp
+    src/network/UDPSyncSender.cpp
+    src/network/SyncManager.cpp
 )
 
 add_executable(video_player ${SOURCES})

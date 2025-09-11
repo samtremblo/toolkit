@@ -1,0 +1,39 @@
+# Network Configuration for Video Player Sync
+# Lines starting with # are comments
+
+# Local settings
+listen_port=10000
+client_name=master-controller
+auto_discover=true
+enable_broadcast=true
+
+# Timing settings
+heartbeat_interval=10
+client_timeout=30
+
+# Sync behavior
+auto_sync=true
+auto_master=true
+respond_to_cues=false
+
+# Target clients (ip:port:name:enabled)
+# Send cues to clients listening on port 9999
+target=127.0.0.1:9999:player-1:true
+target=127.0.0.1:9999:player-2:true
+target=127.0.0.1:9999:player-3:true
+
+# Examples for network clients:
+# target=192.168.1.100:9999:studio-left:true
+# target=192.168.1.101:9999:studio-right:true
+# target=192.168.1.102:9999:studio-center:true
+
+# Slave configuration for localhost testing:
+# Create separate config files for each slave with these settings:
+#
+# listen_port=9999
+# client_name=player-1
+# auto_discover=true
+# enable_broadcast=true
+# auto_sync=true
+# auto_master=false
+# respond_to_cues=true
