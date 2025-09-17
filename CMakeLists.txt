@@ -45,7 +45,7 @@ if(LIBAV_FOUND)
     message(STATUS "FFmpeg found - video and audio support enabled")
 endif()
 
-# Add SDL2 for cross-platform audio output
+# Add SDL2 for cross-platform audio output and UI
 find_package(SDL2 REQUIRED)
 target_link_libraries(video_player ${SDL2_LIBRARIES})
 target_include_directories(video_player PRIVATE ${SDL2_INCLUDE_DIRS})

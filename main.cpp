@@ -17,6 +17,8 @@
 #include <atomic>
 #include <deque>
 #include <SDL2/SDL.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -1063,18 +1065,86 @@ void signal_handler(int sig) {
     exit(sig);
 }
 
+// Simple console-based file picker
+std::string showFilePicker() {
+    std::vector<std::string> videoFiles;
+    std::string currentDir = "./";
+
+    std::cout << "\n=== Video File Picker ===" << std::endl;
+    std::cout << "Scanning current directory for video files..." << std::endl;
+
+    // Get current directory files
+    DIR* dir = opendir(currentDir.c_str());
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename = entry->d_name;
+            if (filename == "." || filename == "..") continue;
+
+            struct stat statbuf;
+            std::string fullpath = currentDir + "/" + filename;
+            if (stat(fullpath.c_str(), &statbuf) == 0) {
+                if (!S_ISDIR(statbuf.st_mode)) {
+                    // Check for video file extensions
+                    std::string ext = filename.substr(filename.find_last_of(".") + 1);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == "mp4" || ext == "avi" || ext == "mkv" || ext == "mov" ||
+                        ext == "wmv" || ext == "flv" || ext == "webm" || ext == "m4v") {
+                        videoFiles.push_back(filename);
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    }
+
+    if (videoFiles.empty()) {
+        std::cout << "No video files found in the current directory." << std::endl;
+        std::cout << "Supported formats: mp4, avi, mkv, mov, wmv, flv, webm, m4v" << std::endl;
+        return "";
+    }
+
+    std::cout << "\nFound " << videoFiles.size() << " video file(s):" << std::endl;
+    for (size_t i = 0; i < videoFiles.size(); i++) {
+        std::cout << "[" << (i + 1) << "] " << videoFiles[i] << std::endl;
+    }
+
+    std::cout << "\nEnter the number of the file you want to play (1-" << videoFiles.size() << "), or 0 to cancel: ";
+
+    int choice;
+    std::cin >> choice;
+
+    if (choice > 0 && choice <= (int)videoFiles.size()) {
+        return currentDir + "/" + videoFiles[choice - 1];
+    }
+
+    return "";
+}
+
 int main(int argc, char* argv[]) {
     try {
-        if (argc != 2) {
+        std::string videoFile;
+
+        if (argc == 2) {
+            // Use command line argument if provided
+            videoFile = argv[1];
+        } else {
+            // Show file picker if no argument provided
             std::cout << "🎬 Enhanced Video Player with Audio Support" << std::endl;
-            std::cout << "Usage: " << argv[0] << " <video_file>" << std::endl;
-            return -1;
+            std::cout << "No file specified. Opening file picker..." << std::endl;
+
+            videoFile = showFilePicker();
+            if (videoFile.empty()) {
+                std::cout << "No file selected. Exiting..." << std::endl;
+                return 0;
+            }
         }
-        
+
         std::cout << "🛡️ Starting Enhanced Video Player with crash protection..." << std::endl;
-        
+        std::cout << "Selected file: " << videoFile << std::endl;
+
         VideoPlayer player;
-        if (player.load_video(argv[1])) {
+        if (player.load_video(videoFile)) {
             player.play();
         }
         
